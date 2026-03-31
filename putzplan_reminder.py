@@ -417,12 +417,15 @@ def load_group_members(api, group_names, exclude_users=None):
 
 # --- Post-Text generieren ---
 
-def build_reminder(this_week, next_week, unassigned=None, single_entry=None):
+def build_reminder(this_week, next_week, unassigned=None, single_entry=None,
+                   schedule_url=None):
     """Erstellt den Reminder-Text.
 
     Args:
         unassigned:   Liste von @usernames ohne Eintrag (nur wenn Dienst < 2)
-        single_entry: Liste von @usernames mit nur 1 Eintrag (wenn alles voll)
+        single_entry: Liste von @usernames mit nur 1 Eintrag (wenn Dienst < 2
+                      aber alle mind. 1x eingetragen)
+        schedule_url: URL zum Putzplan-Post
     """
     parts = []
 
@@ -430,6 +433,8 @@ def build_reminder(this_week, next_week, unassigned=None, single_entry=None):
         parts.append(
             ":warning: Fuer diese Woche gibt es keinen Eintrag im Putzplan!"
         )
+        if schedule_url:
+            parts.append(f"[Link zum Putzplan]({schedule_url})")
         return "\n\n".join(parts)
 
     this_names = get_names(this_week)
@@ -475,13 +480,16 @@ def build_reminder(this_week, next_week, unassigned=None, single_entry=None):
     if unassigned:
         names_str = ", ".join(unassigned)
         parts.append(
-            f":mega: Noch keinen Putzdienst eingetragen haben: {names_str}"
+            f":mega: Noch nicht eingetragen haben sich bisher: {names_str}"
         )
     elif single_entry:
         names_str = ", ".join(single_entry)
         parts.append(
-            f":point_right: Nur einmal eingetragen bisher: {names_str}"
+            f":point_right: Erst einmal eingetragen bisher: {names_str}"
         )
+
+    if schedule_url:
+        parts.append(f"[Link zum Putzplan]({schedule_url})")
 
     return "\n\n".join(parts)
 
@@ -517,16 +525,17 @@ def check_duplicate(api, topic_id, username, date_range_str):
 def find_schedule_post(api, topic_id):
     """Sucht automatisch den Post mit der Putzplan-Tabelle.
 
-    Geht die Posts von hinten (neueste) nach vorne durch und
-    gibt die Post-ID des ersten Posts mit einer gueltigen Tabelle zurueck.
+    Geht die Posts von hinten (neueste) nach vorne durch.
     Laedt Posts in Batches von 20 um Rate-Limits zu vermeiden.
     Nutzt raw-Markdown wenn verfuegbar, sonst cooked-HTML.
+
+    Returns: (post_id, post_number) oder (None, None)
     """
     print("  Suche Putzplan-Tabelle automatisch...")
     all_post_ids = api.get_topic_post_ids(topic_id)
 
     if not all_post_ids:
-        return None
+        return None, None
 
     # Von hinten nach vorne suchen (neueste zuerst), Batches von 20
     batch_size = 20
@@ -555,11 +564,12 @@ def find_schedule_post(api, topic_id):
                     continue
                 weeks = parse_schedule_html(cooked)
             if len(weeks) >= MIN_WEEKS_FOR_DETECTION:
+                post_number = post.get("post_number")
                 print(f"  Putzplan gefunden in Post-ID {post_id} "
-                      f"({len(weeks)} Wochen)")
-                return post_id
+                      f"(#{post_number}, {len(weeks)} Wochen)")
+                return post_id, post_number
 
-    return None
+    return None, None
 
 
 # --- Config ---
@@ -690,18 +700,33 @@ def main():
     print()
 
     # Putzplan-Post finden (auto-detect oder konfiguriert)
+    schedule_post_number = None
     if schedule_post_id:
         print(f"Lade Putzplan (Post-ID {schedule_post_id})...")
+        # Post-Nummer fuer den Link ermitteln
+        try:
+            posts = api.get_posts_batch(topic_id, [schedule_post_id])
+            for p in posts:
+                if p["id"] == schedule_post_id:
+                    schedule_post_number = p.get("post_number")
+                    break
+        except requests.RequestException:
+            pass
     else:
         print("Kein DISCOURSE_SCHEDULE_POST_ID gesetzt, suche automatisch...")
         try:
-            schedule_post_id = find_schedule_post(api, topic_id)
+            schedule_post_id, schedule_post_number = find_schedule_post(api, topic_id)
         except requests.RequestException as e:
             print(f"FEHLER: Konnte Topic nicht laden: {e}")
             sys.exit(2)
         if not schedule_post_id:
             print("FEHLER: Kein Post mit Putzplan-Tabelle gefunden!")
             sys.exit(3)
+
+    # Link zum Putzplan-Post
+    schedule_url = f"{url}/t/{topic_id}"
+    if schedule_post_number:
+        schedule_url += f"/{schedule_post_number}"
 
     # Putzplan laden (raw bevorzugen, cooked-HTML als Fallback)
     weeks = []
@@ -753,32 +778,32 @@ def main():
             api, member_groups, exclude_users=config["exclude_users"],
         )
 
-        # Pruefen ob diese/naechste Woche voll besetzt (je 2 Putzer)
+        # Pruefen ob ein Dienst nicht voll besetzt ist (< 2 Putzer)
         this_full = this_week is not None and len(get_names(this_week)) >= 2
         next_full = next_week is None or len(get_names(next_week)) >= 2
+        needs_filling = not this_full or not next_full
 
-        if not this_full or not next_full:
-            # Nicht voll besetzt: zeige wer gar nicht eingetragen ist
+        if needs_filling:
+            # Platz frei: gibt es Leute mit 0 Eintraegen?
             unassigned = sorted(
                 f"@{name}" for name in (all_members - assigned_names)
             )
             if unassigned:
                 print(f"  {len(unassigned)} Mitglieder noch ohne Putzdienst.")
-        else:
-            # Voll besetzt: zeige wer nur 1x eingetragen ist
-            single_entry = sorted(
-                f"@{name}" for name in all_members
-                if assignment_counts.get(name, 0) == 1
-            )
-            if single_entry:
-                print(f"  {len(single_entry)} Mitglieder nur einmal eingetragen.")
             else:
-                print("  Alle Mitglieder haben mehrere Putzdienste!")
+                # Alle haben mind. 1x, zeige wer nur 1x eingetragen ist
+                single_entry = sorted(
+                    f"@{name}" for name in all_members
+                    if assignment_counts.get(name, 0) == 1
+                )
+                if single_entry:
+                    print(f"  {len(single_entry)} Mitglieder erst einmal eingetragen.")
 
     # Reminder-Text
     reminder = build_reminder(
         this_week, next_week,
         unassigned=unassigned, single_entry=single_entry,
+        schedule_url=schedule_url,
     )
     print(f"\n--- Reminder-Text ---\n{reminder}\n--- Ende ---\n")
 
