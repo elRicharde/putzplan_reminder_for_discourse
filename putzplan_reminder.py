@@ -812,9 +812,11 @@ def main():
         return
 
     # Duplikat-Schutz
+    # Suche nach "Kommende Woche {range}" statt nur dem Datumsbereich,
+    # da der Bereich auch im vorherigen Reminder als "Woche darauf" vorkommt.
     if not args.force:
         if this_week:
-            dup_search_str = format_date_range(this_week)
+            dup_search_str = f"Kommende Woche {format_date_range(this_week)}"
         else:
             dup_search_str = "keinen Eintrag im Putzplan"
         print("Pruefe auf Duplikate...")
