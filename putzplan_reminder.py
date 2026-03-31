@@ -464,7 +464,17 @@ def find_schedule_post(api, topic_id):
             post = posts_by_id.get(post_id)
             if not post:
                 continue
-            raw = post.get("raw", "") or post.get("cooked", "")
+            raw = post.get("raw", "")
+            # Batch-API liefert oft kein raw — einzeln nachladen
+            # Vorfilter: cooked muss <table> enthalten
+            if not raw:
+                cooked = post.get("cooked", "")
+                if "<table" not in cooked:
+                    continue
+                try:
+                    raw = api.get_post_raw(post_id)
+                except requests.RequestException:
+                    continue
             weeks = parse_schedule(raw)
             if len(weeks) >= MIN_WEEKS_FOR_DETECTION:
                 print(f"  Putzplan gefunden in Post-ID {post_id} "
