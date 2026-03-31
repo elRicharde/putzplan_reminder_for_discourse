@@ -106,6 +106,18 @@ class DiscourseAPI:
         resp = self._request_with_retry("GET", f"{self.base_url}/posts/{post_id}.json")
         return resp.json().get("raw", "")
 
+    def get_post_cooked(self, topic_id, post_id):
+        """Cooked-HTML eines Posts ueber die Topic-API laden.
+
+        Nutzt /t/{topic_id}/posts.json statt /posts/{id}.json,
+        da letzteres hoehere Berechtigungen erfordert.
+        """
+        posts = self.get_posts_batch(topic_id, [post_id])
+        for post in posts:
+            if post["id"] == post_id:
+                return post.get("cooked", "")
+        return ""
+
     def create_post(self, topic_id, raw):
         """Neuen Post in einem Topic erstellen."""
         resp = self._request_with_retry(
@@ -234,6 +246,48 @@ def parse_schedule(raw_text):
             "putzer1": putzer1,
             "putzer2": putzer2,
             "raw_line": line,
+        })
+
+    return weeks
+
+
+def parse_schedule_html(html):
+    """Parst eine HTML-Tabelle (cooked) und gibt eine Liste von Wochen zurueck.
+
+    Fallback fuer den Fall, dass raw-Markdown nicht verfuegbar ist
+    (z.B. weil /posts/{id}.json 403 liefert).
+    """
+    weeks = []
+    rows = re.findall(r'<tr>(.*?)</tr>', html, re.DOTALL)
+    for row in rows:
+        cells = re.findall(r'<t[dh]>(.*?)</t[dh]>', row, re.DOTALL)
+        if len(cells) < 3:
+            continue
+        # HTML-Tags entfernen, nur Text behalten
+        cell_texts = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+
+        date_match = re.match(
+            r"(\d{2}\.\d{2}\.\d{4})\s*-\s*(\d{2}\.\d{2}\.\d{4})",
+            cell_texts[0],
+        )
+        if not date_match:
+            continue
+
+        try:
+            start = datetime.strptime(date_match.group(1), DATE_FMT).date()
+            end = datetime.strptime(date_match.group(2), DATE_FMT).date()
+        except ValueError:
+            continue
+
+        putzer1 = extract_name(cell_texts[1]) if len(cell_texts) > 1 else None
+        putzer2 = extract_name(cell_texts[2]) if len(cell_texts) > 2 else None
+
+        weeks.append({
+            "start_date": start,
+            "end_date": end,
+            "putzer1": putzer1,
+            "putzer2": putzer2,
+            "raw_line": "",
         })
 
     return weeks
@@ -440,10 +494,10 @@ def find_schedule_post(api, topic_id):
     Geht die Posts von hinten (neueste) nach vorne durch und
     gibt die Post-ID des ersten Posts mit einer gueltigen Tabelle zurueck.
     Laedt Posts in Batches von 20 um Rate-Limits zu vermeiden.
+    Nutzt raw-Markdown wenn verfuegbar, sonst cooked-HTML.
     """
     print("  Suche Putzplan-Tabelle automatisch...")
     all_post_ids = api.get_topic_post_ids(topic_id)
-    print(f"  {len(all_post_ids)} Posts im Topic gefunden.")
 
     if not all_post_ids:
         return None
@@ -453,12 +507,10 @@ def find_schedule_post(api, topic_id):
     for batch_start in range(len(all_post_ids) - 1, -1, -batch_size):
         batch_end = max(0, batch_start - batch_size + 1)
         batch_ids = all_post_ids[batch_end:batch_start + 1]
-        print(f"  Pruefe Batch: Post-IDs {batch_ids[0]}..{batch_ids[-1]}")
 
         try:
             posts = api.get_posts_batch(topic_id, batch_ids)
-        except requests.RequestException as e:
-            print(f"    Batch-Fehler: {e}")
+        except requests.RequestException:
             continue
 
         # Innerhalb des Batches: neueste zuerst pruefen
@@ -466,25 +518,16 @@ def find_schedule_post(api, topic_id):
         for post_id in reversed(batch_ids):
             post = posts_by_id.get(post_id)
             if not post:
-                print(f"    Post {post_id}: nicht in Antwort")
                 continue
+            # raw bevorzugen, sonst cooked-HTML parsen
             raw = post.get("raw", "")
-            has_raw = bool(raw)
-            # Batch-API liefert oft kein raw — einzeln nachladen
-            # Vorfilter: cooked muss <table> enthalten
-            if not raw:
+            if raw:
+                weeks = parse_schedule(raw)
+            else:
                 cooked = post.get("cooked", "")
-                has_table = "<table" in cooked
-                print(f"    Post {post_id}: kein raw, cooked hat table={has_table}, cooked={cooked[:120]}...")
-                if not has_table:
+                if "<table" not in cooked:
                     continue
-                try:
-                    raw = api.get_post_raw(post_id)
-                except requests.RequestException as e:
-                    print(f"    Post {post_id}: raw nachladen fehlgeschlagen: {e}")
-                    continue
-            weeks = parse_schedule(raw)
-            print(f"    Post {post_id}: raw={has_raw}, {len(weeks)} Wochen gefunden")
+                weeks = parse_schedule_html(cooked)
             if len(weeks) >= MIN_WEEKS_FOR_DETECTION:
                 print(f"  Putzplan gefunden in Post-ID {post_id} "
                       f"({len(weeks)} Wochen)")
@@ -634,18 +677,21 @@ def main():
             print("FEHLER: Kein Post mit Putzplan-Tabelle gefunden!")
             sys.exit(3)
 
-    # Putzplan laden
+    # Putzplan laden (raw bevorzugen, cooked-HTML als Fallback)
+    weeks = []
     try:
         raw = api.get_post_raw(schedule_post_id)
-    except requests.HTTPError as e:
-        print(f"FEHLER: Post {schedule_post_id} konnte nicht geladen werden: {e}")
-        sys.exit(2)
-    except requests.RequestException as e:
-        print(f"FEHLER: Netzwerkfehler beim Laden des Putzplans: {e}")
-        sys.exit(2)
-
-    weeks = parse_schedule(raw)
-    print(f"  {len(weeks)} Wochen im Plan gefunden.")
+        weeks = parse_schedule(raw)
+        print(f"  {len(weeks)} Wochen im Plan gefunden (raw).")
+    except requests.RequestException:
+        print(f"  raw-Endpoint nicht verfuegbar, nutze cooked-HTML...")
+        try:
+            cooked = api.get_post_cooked(topic_id, schedule_post_id)
+            weeks = parse_schedule_html(cooked)
+            print(f"  {len(weeks)} Wochen im Plan gefunden (cooked).")
+        except requests.RequestException as e:
+            print(f"FEHLER: Putzplan konnte nicht geladen werden: {e}")
+            sys.exit(2)
 
     if not weeks:
         print("FEHLER: Keine Wochen in der Tabelle gefunden!")
