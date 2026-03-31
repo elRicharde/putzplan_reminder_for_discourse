@@ -443,6 +443,7 @@ def find_schedule_post(api, topic_id):
     """
     print("  Suche Putzplan-Tabelle automatisch...")
     all_post_ids = api.get_topic_post_ids(topic_id)
+    print(f"  {len(all_post_ids)} Posts im Topic gefunden.")
 
     if not all_post_ids:
         return None
@@ -452,10 +453,12 @@ def find_schedule_post(api, topic_id):
     for batch_start in range(len(all_post_ids) - 1, -1, -batch_size):
         batch_end = max(0, batch_start - batch_size + 1)
         batch_ids = all_post_ids[batch_end:batch_start + 1]
+        print(f"  Pruefe Batch: Post-IDs {batch_ids[0]}..{batch_ids[-1]}")
 
         try:
             posts = api.get_posts_batch(topic_id, batch_ids)
-        except requests.RequestException:
+        except requests.RequestException as e:
+            print(f"    Batch-Fehler: {e}")
             continue
 
         # Innerhalb des Batches: neueste zuerst pruefen
@@ -463,19 +466,25 @@ def find_schedule_post(api, topic_id):
         for post_id in reversed(batch_ids):
             post = posts_by_id.get(post_id)
             if not post:
+                print(f"    Post {post_id}: nicht in Antwort")
                 continue
             raw = post.get("raw", "")
+            has_raw = bool(raw)
             # Batch-API liefert oft kein raw — einzeln nachladen
             # Vorfilter: cooked muss <table> enthalten
             if not raw:
                 cooked = post.get("cooked", "")
-                if "<table" not in cooked:
+                has_table = "<table" in cooked
+                print(f"    Post {post_id}: kein raw, cooked hat table={has_table}, cooked={cooked[:120]}...")
+                if not has_table:
                     continue
                 try:
                     raw = api.get_post_raw(post_id)
-                except requests.RequestException:
+                except requests.RequestException as e:
+                    print(f"    Post {post_id}: raw nachladen fehlgeschlagen: {e}")
                     continue
             weeks = parse_schedule(raw)
+            print(f"    Post {post_id}: raw={has_raw}, {len(weeks)} Wochen gefunden")
             if len(weeks) >= MIN_WEEKS_FOR_DETECTION:
                 print(f"  Putzplan gefunden in Post-ID {post_id} "
                       f"({len(weeks)} Wochen)")
