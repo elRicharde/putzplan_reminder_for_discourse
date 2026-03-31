@@ -37,6 +37,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 
 try:
@@ -239,12 +240,14 @@ def parse_schedule(raw_text):
 
         putzer1 = extract_name(cells[2]) if len(cells) > 2 else None
         putzer2 = extract_name(cells[3]) if len(cells) > 3 else None
+        remarks_mentions = extract_all_mentions(cells[4]) if len(cells) > 4 else []
 
         weeks.append({
             "start_date": start,
             "end_date": end,
             "putzer1": putzer1,
             "putzer2": putzer2,
+            "remarks_mentions": remarks_mentions,
             "raw_line": line,
         })
 
@@ -281,12 +284,14 @@ def parse_schedule_html(html):
 
         putzer1 = extract_name(cell_texts[1]) if len(cell_texts) > 1 else None
         putzer2 = extract_name(cell_texts[2]) if len(cell_texts) > 2 else None
+        remarks_mentions = extract_all_mentions(cell_texts[3]) if len(cell_texts) > 3 else []
 
         weeks.append({
             "start_date": start,
             "end_date": end,
             "putzer1": putzer1,
             "putzer2": putzer2,
+            "remarks_mentions": remarks_mentions,
             "raw_line": "",
         })
 
@@ -319,6 +324,14 @@ def extract_name(cell_text):
         return name_match.group(1)
 
     return None
+
+
+def extract_all_mentions(text):
+    """Extrahiert alle @Usernames aus einem Text.
+
+    Returns: Liste von Usernames (lowercase, ohne @-Prefix).
+    """
+    return [m.lower() for m in re.findall(r"@([\w.\-]+)", text)]
 
 
 # --- Wochen-Logik ---
@@ -361,27 +374,31 @@ def get_names(week):
 
 # --- Gruppen-Abgleich ---
 
-def get_all_assigned_names(weeks):
-    """Sammelt alle Namen die irgendwo im Putzplan eingetragen sind.
+def count_assignments(weeks):
+    """Zaehlt wie oft jede Person im Putzplan vorkommt.
 
-    Gibt ein Set von lowercase Usernames zurueck (ohne @-Prefix).
+    Beruecksichtigt alle Spalten: Putzer1, Putzer2, Bemerkungen.
+    Jede @Mention zaehlt als ein Eintrag.
+
+    Returns: Counter {username_lowercase: anzahl}
     """
-    assigned = set()
+    counts = Counter()
     for week in weeks:
         for name in (week["putzer1"], week["putzer2"]):
             if name:
-                # @username -> username, username -> username
-                assigned.add(name.lstrip("@").lower())
-    return assigned
+                counts[name.lstrip("@").lower()] += 1
+        for mention in week.get("remarks_mentions", []):
+            counts[mention] += 1
+    return counts
 
 
-def find_unassigned_members(api, group_names, assigned_names, exclude_users=None):
-    """Findet Mitglieder der Gruppen die noch keinen Putzdienst haben.
+def load_group_members(api, group_names, exclude_users=None):
+    """Laedt alle Mitglieder der angegebenen Gruppen.
 
     Args:
-        exclude_users: Set von Usernames die nie putzen muessen
+        exclude_users: Set von Usernames die ausgenommen werden
 
-    Returns: sortierte Liste von @username Strings
+    Returns: Set von lowercase Usernames
     """
     if exclude_users is None:
         exclude_users = set()
@@ -395,14 +412,18 @@ def find_unassigned_members(api, group_names, assigned_names, exclude_users=None
         except requests.RequestException as e:
             print(f"  WARNUNG: Gruppe '{group_name}' konnte nicht geladen werden: {e}")
 
-    unassigned = all_members - assigned_names - exclude_users
-    return sorted(f"@{name}" for name in unassigned)
+    return all_members - exclude_users
 
 
 # --- Post-Text generieren ---
 
-def build_reminder(this_week, next_week, unassigned=None):
-    """Erstellt den Reminder-Text."""
+def build_reminder(this_week, next_week, unassigned=None, single_entry=None):
+    """Erstellt den Reminder-Text.
+
+    Args:
+        unassigned:   Liste von @usernames ohne Eintrag (nur wenn Dienst < 2)
+        single_entry: Liste von @usernames mit nur 1 Eintrag (wenn alles voll)
+    """
     parts = []
 
     if this_week is None:
@@ -455,6 +476,11 @@ def build_reminder(this_week, next_week, unassigned=None):
         names_str = ", ".join(unassigned)
         parts.append(
             f":mega: Noch keinen Putzdienst eingetragen haben: {names_str}"
+        )
+    elif single_entry:
+        names_str = ", ".join(single_entry)
+        parts.append(
+            f":point_right: Nur einmal eingetragen bisher: {names_str}"
         )
 
     return "\n\n".join(parts)
@@ -713,24 +739,47 @@ def main():
         print(f"    Putzer 1: {next_week['putzer1'] or '(leer)'}")
         print(f"    Putzer 2: {next_week['putzer2'] or '(leer)'}")
 
-    # Gruppen-Abgleich: Wer hat noch keinen Putzdienst?
+    # Gruppen-Abgleich
     unassigned = []
+    single_entry = []
     member_groups = config["member_groups"]
     if member_groups:
         print(f"Lade Gruppen-Mitglieder ({', '.join(member_groups)})...")
-        assigned_names = get_all_assigned_names(weeks)
+        assignment_counts = count_assignments(weeks)
+        assigned_names = set(assignment_counts.keys())
         print(f"  {len(assigned_names)} Personen im Putzplan eingetragen.")
-        unassigned = find_unassigned_members(
-            api, member_groups, assigned_names,
-            exclude_users=config["exclude_users"],
+
+        all_members = load_group_members(
+            api, member_groups, exclude_users=config["exclude_users"],
         )
-        if unassigned:
-            print(f"  {len(unassigned)} Mitglieder noch ohne Putzdienst.")
+
+        # Pruefen ob diese/naechste Woche voll besetzt (je 2 Putzer)
+        this_full = this_week is not None and len(get_names(this_week)) >= 2
+        next_full = next_week is None or len(get_names(next_week)) >= 2
+
+        if not this_full or not next_full:
+            # Nicht voll besetzt: zeige wer gar nicht eingetragen ist
+            unassigned = sorted(
+                f"@{name}" for name in (all_members - assigned_names)
+            )
+            if unassigned:
+                print(f"  {len(unassigned)} Mitglieder noch ohne Putzdienst.")
         else:
-            print("  Alle Mitglieder haben einen Putzdienst!")
+            # Voll besetzt: zeige wer nur 1x eingetragen ist
+            single_entry = sorted(
+                f"@{name}" for name in all_members
+                if assignment_counts.get(name, 0) == 1
+            )
+            if single_entry:
+                print(f"  {len(single_entry)} Mitglieder nur einmal eingetragen.")
+            else:
+                print("  Alle Mitglieder haben mehrere Putzdienste!")
 
     # Reminder-Text
-    reminder = build_reminder(this_week, next_week, unassigned=unassigned)
+    reminder = build_reminder(
+        this_week, next_week,
+        unassigned=unassigned, single_entry=single_entry,
+    )
     print(f"\n--- Reminder-Text ---\n{reminder}\n--- Ende ---\n")
 
     if args.dry_run:
