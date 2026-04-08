@@ -16,8 +16,7 @@ Ein Python-Bot, der wöchentlich einen Putzplan-Reminder in ein Discourse-Forum 
 
 ## Voraussetzungen
 
-- Python 3.7+
-- `requests`
+- Docker und Docker Compose
 - Ein Discourse-Forum mit API-Key
 
 ## Installation
@@ -25,15 +24,9 @@ Ein Python-Bot, der wöchentlich einen Putzplan-Reminder in ein Discourse-Forum 
 ```bash
 git clone https://github.com/elRicharde/putzplan_reminder_for_discourse.git
 cd putzplan_reminder_for_discourse
-pip install requests
 cp .env.example .env
 # .env mit eigenen Werten befüllen
-```
-
-Auf Ubuntu 23.04+ (mit "externally managed environment"):
-
-```bash
-sudo apt install python3-requests
+docker compose build
 ```
 
 ## Konfiguration
@@ -64,16 +57,16 @@ Kopiere `.env.example` nach `.env` und trage die Werte ein:
 
 ```bash
 # Reminder erstellen
-python putzplan_reminder.py
+docker compose run --rm putzplan-reminder
 
 # Nur anzeigen, nicht posten
-python putzplan_reminder.py --dry-run
+docker compose run --rm putzplan-reminder --dry-run
 
 # Duplikat-Schutz umgehen
-python putzplan_reminder.py --force
+docker compose run --rm putzplan-reminder --force
 
 # Datum simulieren (z.B. um nächste Woche zu testen)
-python putzplan_reminder.py --date 15.06.2025 --dry-run
+docker compose run --rm putzplan-reminder --date 15.06.2025 --dry-run
 ```
 
 ## Cron-Job (jeden Sonntag 19:00)
@@ -83,7 +76,7 @@ crontab -e
 ```
 
 ```
-0 19 * * 0 /usr/bin/python3 /path/to/putzplan_reminder.py >> /path/to/cron.log 2>&1
+0 19 * * 0 cd ~/putzplan_reminder_for_discourse && docker compose run --rm putzplan-reminder >> ~/putzplan_reminder_for_discourse/cron.log 2>&1
 ```
 
 ## Erwartetes Tabellenformat
@@ -91,7 +84,7 @@ crontab -e
 Der Bot erwartet eine Markdown-Tabelle mit 4-5 Spalten:
 
 ```
-| Woche                     | Putzer 1 | Putzer 2 | Bemerkungen      |
+| Woche                    | Putzer 1 | Putzer 2 | Bemerkungen      |
 | 02.06.2025 - 08.06.2025  | @user1   | @user2   |                  |
 | 09.06.2025 - 15.06.2025  | @user3   |          | @user4 tauscht   |
 | 16.06.2025 - 22.06.2025  |          |          |                  |
