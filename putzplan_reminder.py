@@ -10,8 +10,8 @@ Aufruf:
     python3 putzplan_reminder.py --dry-run      # Nur anzeigen, nicht posten
     python3 putzplan_reminder.py --force         # Duplikat-Schutz umgehen
 
-Cron (jeden Sonntag 19:00):
-    0 19 * * 0 /usr/bin/python3 /opt/putzplan/putzplan_reminder.py
+Cron (jeden Sonntag 17-18 UTC, Script prueft ob 19 Uhr in Berlin):
+    0 17-18 * * 0 /usr/bin/python3 /opt/putzplan/putzplan_reminder.py
 
 Umgebungsvariablen (oder .env-Datei):
     DISCOURSE_URL              - Forum-URL (z.B. https://forum.nullsieben.be)
@@ -39,6 +39,7 @@ import sys
 import time
 from collections import Counter
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 try:
     import requests
@@ -658,6 +659,14 @@ def main():
     parser.add_argument("--date", type=str, default=None,
                         help="Datum simulieren (dd.mm.yyyy), Standard: heute")
     args = parser.parse_args()
+
+    # Timezone-Check: nur um 19 Uhr Berliner Zeit ausfuehren
+    # (Cron laeuft stuendlich 17-18 UTC, da Server kein TZ unterstuetzt)
+    if not args.dry_run and not args.date:
+        berlin_now = datetime.now(ZoneInfo("Europe/Berlin"))
+        if berlin_now.hour != 19:
+            print(f"Nicht 19 Uhr in Berlin (aktuell {berlin_now.strftime('%H:%M')}), ueberspringe.")
+            return
 
     # Config laden
     config = load_config()

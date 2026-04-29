@@ -3,7 +3,7 @@ services:
     build: .
     env_file:
       - .env
-    # Jeden Sonntag um 19:00 ausfuehren via Ofelia (oder externen Cron)
+    # Jeden Sonntag 17-18 UTC ausfuehren, Script prueft ob 19 Uhr Berlin
     # Fuer einmaligen Testlauf:
     #   docker compose run --rm putzplan-reminder
     # Dry-Run:
@@ -18,7 +18,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
-      ofelia.job-run.putzplan.schedule: "0 19 * * 0"
+      ofelia.job-run.putzplan.schedule: "0 17-18 * * 0"
       ofelia.job-run.putzplan.container: "putzplan-reminder"
     profiles:
       - cron
